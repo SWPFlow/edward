@@ -62,10 +62,10 @@ def main(_):
 
   overall_mu = Normal(loc=tf.zeros(1), scale=tf.ones(1))
 
-  student_etas = Normal(loc=tf.zeros(FLAGS.n_students),
-                        scale=sigma_students * tf.ones(FLAGS.n_students))
-  question_etas = Normal(loc=tf.zeros(FLAGS.n_questions),
-                         scale=sigma_questions * tf.ones(FLAGS.n_questions))
+  student_etas = Normal(loc=0.0, scale=sigma_students,
+                        sample_shape=FLAGS.n_students)
+  question_etas = Normal(loc=0.0, scale=sigma_questions,
+                         sample_shape=FLAGS.n_questions)
 
   observation_logodds = (tf.gather(student_etas, student_ids) +
                          tf.gather(question_etas, question_ids) +
