@@ -27,21 +27,25 @@ from edward.models import Categorical
 from edward.util import Progbar
 from observations import text8
 
-data_dir = "/tmp/data"
-log_dir = "/tmp/log"
-n_epoch = 200
-batch_size = 128
-hidden_size = 512
-timesteps = 64
-lr = 5e-3
+
+tf.flags.DEFINE_string("data_dir", default="/tmp/data", help="")
+tf.flags.DEFINE_string("log_dir", default="/tmp/log", help="")
+tf.flags.DEFINE_integer("n_epoch", default=200, help="")
+tf.flags.DEFINE_integer("batch_size", default=128, help="")
+tf.flags.DEFINE_integer("hidden_size", default=512, help="")
+tf.flags.DEFINE_integer("timesteps", default=64, help="")
+tf.flags.DEFINE_float("lr", default=5e-3, help="")
+
+FLAGS = tf.flags.FLAGS
 
 timestamp = datetime.strftime(datetime.utcnow(), "%Y%m%d_%H%M%S")
 hyperparam_str = '_'.join([
     var + '_' + str(eval(var)).replace('.', '_')
-    for var in ['batch_size', 'hidden_size', 'timesteps', 'lr']])
-log_dir = os.path.join(log_dir, timestamp + '_' + hyperparam_str)
-if not os.path.exists(log_dir):
-  os.makedirs(log_dir)
+    for var in ['FLAGS.batch_size', 'FLAGS.hidden_size',
+                'FLAGS.timesteps', 'FLAGS.lr']])
+FLAGS.log_dir = os.path.join(FLAGS.log_dir, timestamp + '_' + hyperparam_str)
+if not os.path.exists(FLAGS.log_dir):
+  os.makedirs(FLAGS.log_dir)
 
 
 def lstm_cell(x, h, c, name=None, reuse=False):
@@ -83,133 +87,138 @@ def generator(input, batch_size, timesteps, encoder):
     yield encoded
 
 
-def language_model(input):
-  """Form p(x[0], ..., x[timesteps - 1]),
+def main(_):
+  def language_model(input):
+    """Form p(x[0], ..., x[timesteps - 1]),
 
-  \prod_{t=0}^{timesteps - 1} p(x[t] | x[:t]),
+    \prod_{t=0}^{timesteps - 1} p(x[t] | x[:t]),
 
-  To calculate the probability, we call log_prob on
-  x = [x[0], ..., x[timesteps - 1]] given
-  `input` = [0, x[0], ..., x[timesteps - 2]].
+    To calculate the probability, we call log_prob on
+    x = [x[0], ..., x[timesteps - 1]] given
+    `input` = [0, x[0], ..., x[timesteps - 2]].
 
-  We implement this separately from the generative model so the
-  forward pass, e.g., embedding/dense layers, can be parallelized.
+    We implement this separately from the generative model so the
+    forward pass, e.g., embedding/dense layers, can be parallelized.
 
-  [batch_size, timesteps] -> [batch_size, timesteps]
-  """
-  x = tf.one_hot(input, depth=vocab_size, dtype=tf.float32)
-  h = tf.fill(tf.stack([tf.shape(x)[0], hidden_size]), 0.0)
-  c = tf.fill(tf.stack([tf.shape(x)[0], hidden_size]), 0.0)
-  hs = []
-  reuse = None
-  for t in range(timesteps):
-    if t > 0:
-      reuse = True
-    xt = x[:, t, :]
-    h, c = lstm_cell(xt, h, c, name="lstm", reuse=reuse)
-    hs.append(h)
+    [batch_size, timesteps] -> [batch_size, timesteps]
+    """
+    x = tf.one_hot(input, depth=vocab_size, dtype=tf.float32)
+    h = tf.fill(tf.stack([tf.shape(x)[0], FLAGS.hidden_size]), 0.0)
+    c = tf.fill(tf.stack([tf.shape(x)[0], FLAGS.hidden_size]), 0.0)
+    hs = []
+    reuse = None
+    for t in range(FLAGS.timesteps):
+      if t > 0:
+        reuse = True
+      xt = x[:, t, :]
+      h, c = lstm_cell(xt, h, c, name="lstm", reuse=reuse)
+      hs.append(h)
 
-  h = tf.stack(hs, 1)
-  logits = tf.layers.dense(h, vocab_size, name="dense")
-  output = Categorical(logits=logits)
-  return output
-
-
-def language_model_gen(batch_size):
-  """Generate x ~ prod p(x_t | x_{<t}). Output [batch_size, timesteps].
-  """
-  # Initialize data input randomly.
-  x = tf.random_uniform([batch_size], 0, vocab_size, dtype=tf.int32)
-  h = tf.zeros([batch_size, hidden_size])
-  c = tf.zeros([batch_size, hidden_size])
-  xs = []
-  for _ in range(timesteps):
-    x = tf.one_hot(x, depth=vocab_size, dtype=tf.float32)
-    h, c = lstm_cell(x, h, c, name="lstm")
+    h = tf.stack(hs, 1)
     logits = tf.layers.dense(h, vocab_size, name="dense")
-    x = Categorical(logits=logits).value()
-    xs.append(x)
+    output = Categorical(logits=logits)
+    return output
 
-  xs = tf.cast(tf.stack(xs, 1), tf.int32)
-  return xs
+  def language_model_gen(batch_size):
+    """Generate x ~ prod p(x_t | x_{<t}). Output [batch_size, timesteps].
+    """
+    # Initialize data input randomly.
+    x = tf.random_uniform([FLAGS.batch_size], 0, vocab_size, dtype=tf.int32)
+    h = tf.zeros([FLAGS.batch_size, FLAGS.hidden_size])
+    c = tf.zeros([FLAGS.batch_size, FLAGS.hidden_size])
+    xs = []
+    for _ in range(FLAGS.timesteps):
+      x = tf.one_hot(x, depth=vocab_size, dtype=tf.float32)
+      h, c = lstm_cell(x, h, c, name="lstm")
+      logits = tf.layers.dense(h, vocab_size, name="dense")
+      x = Categorical(logits=logits).value()
+      xs.append(x)
 
+    xs = tf.cast(tf.stack(xs, 1), tf.int32)
+    return xs
+  ed.set_seed(42)
 
-ed.set_seed(42)
+  # DATA
+  x_train, _, x_test = text8(FLAGS.data_dir)
+  vocab = string.ascii_lowercase + ' '
+  vocab_size = len(vocab)
+  encoder = dict(zip(vocab, range(vocab_size)))
+  decoder = {v: k for k, v in encoder.items()}
 
-# DATA
-x_train, _, x_test = text8(data_dir)
-vocab = string.ascii_lowercase + ' '
-vocab_size = len(vocab)
-encoder = dict(zip(vocab, range(vocab_size)))
-decoder = {v: k for k, v in encoder.items()}
+  data = generator(x_train, FLAGS.batch_size, FLAGS.timesteps, encoder)
 
-data = generator(x_train, batch_size, timesteps, encoder)
+  # MODEL
+  x_ph = tf.placeholder(tf.int32, [None, FLAGS.timesteps])
+  with tf.variable_scope("language_model"):
+    # Shift input sequence to right by 1, [0, x[0], ..., x[timesteps - 2]].
+    x_ph_shift = tf.pad(x_ph, [[0, 0], [1, 0]])[:, :-1]
+    x = language_model(x_ph_shift)
 
-# MODEL
-x_ph = tf.placeholder(tf.int32, [None, timesteps])
-with tf.variable_scope("language_model"):
-  # Shift input sequence to right by 1, [0, x[0], ..., x[timesteps - 2]].
-  x_ph_shift = tf.pad(x_ph, [[0, 0], [1, 0]])[:, :-1]
-  x = language_model(x_ph_shift)
+  with tf.variable_scope("language_model", reuse=True):
+    x_gen = language_model_gen(5)
 
-with tf.variable_scope("language_model", reuse=True):
-  x_gen = language_model_gen(5)
+  imb = range(0, len(x_test) - FLAGS.timesteps, FLAGS.timesteps)
+  encoded_x_test = np.asarray(
+      [[encoder[c] for c in x_test[i:(i + FLAGS.timesteps)]] for i in imb],
+      dtype=np.int32)
+  test_size = encoded_x_test.shape[0]
+  print("Test set shape: {}".format(encoded_x_test.shape))
+  test_nll = -tf.reduce_sum(x.log_prob(x_ph))
 
-imb = range(0, len(x_test) - timesteps, timesteps)
-encoded_x_test = np.asarray(
-    [[encoder[c] for c in x_test[i:(i + timesteps)]] for i in imb],
-    dtype=np.int32)
-test_size = encoded_x_test.shape[0]
-print("Test set shape: {}".format(encoded_x_test.shape))
-test_nll = -tf.reduce_sum(x.log_prob(x_ph))
+  # INFERENCE
+  inference = ed.MAP({}, {x: x_ph})
 
-# INFERENCE
-inference = ed.MAP({}, {x: x_ph})
+  optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.lr)
+  inference.initialize(optimizer=optimizer,
+                       logdir=FLAGS.log_dir,
+                       log_timestamp=False)
 
-optimizer = tf.train.AdamOptimizer(learning_rate=lr)
-inference.initialize(optimizer=optimizer, logdir=log_dir, log_timestamp=False)
+  print("Number of sets of parameters: {}".format(
+      len(tf.trainable_variables())))
+  print("Number of parameters: {}".format(
+      np.sum([np.prod(v.shape.as_list()) for v in tf.trainable_variables()])))
+  for v in tf.trainable_variables():
+    print(v)
 
-print("Number of sets of parameters: {}".format(len(tf.trainable_variables())))
-print("Number of parameters: {}".format(
-    np.sum([np.prod(v.shape.as_list()) for v in tf.trainable_variables()])))
-for v in tf.trainable_variables():
-  print(v)
+  sess = ed.get_session()
+  tf.global_variables_initializer().run()
 
-sess = ed.get_session()
-tf.global_variables_initializer().run()
+  # Double n_epoch and print progress every half an epoch.
+  n_iter_per_epoch = len(x_train) // (FLAGS.batch_size * FLAGS.timesteps * 2)
+  epoch = 0.0
+  for _ in range(FLAGS.n_epoch * 2):
+    epoch += 0.5
+    print("Epoch: {0}".format(epoch))
+    avg_nll = 0.0
 
-# Double n_epoch and print progress every half an epoch.
-n_iter_per_epoch = len(x_train) // (batch_size * timesteps * 2)
-epoch = 0.0
-for _ in range(n_epoch * 2):
-  epoch += 0.5
-  print("Epoch: {0}".format(epoch))
-  avg_nll = 0.0
+    pbar = Progbar(n_iter_per_epoch)
+    for t in range(1, n_iter_per_epoch + 1):
+      pbar.update(t)
+      x_batch = next(data)
+      info_dict = inference.update({x_ph: x_batch})
+      avg_nll += info_dict['loss']
 
-  pbar = Progbar(n_iter_per_epoch)
-  for t in range(1, n_iter_per_epoch + 1):
-    pbar.update(t)
-    x_batch = next(data)
-    info_dict = inference.update({x_ph: x_batch})
-    avg_nll += info_dict['loss']
+    # Print average bits per character over epoch.
+    avg_nll /= (n_iter_per_epoch * FLAGS.batch_size * FLAGS.timesteps *
+                np.log(2))
+    print("Train average bits/char: {:0.8f}".format(avg_nll))
 
-  # Print average bits per character over epoch.
-  avg_nll /= (n_iter_per_epoch * batch_size * timesteps * np.log(2))
-  print("Train average bits/char: {:0.8f}".format(avg_nll))
+    # Print per-data point log-likelihood on test set.
+    avg_nll = 0.0
+    for start in range(0, test_size, batch_size):
+      end = min(test_size, start + batch_size)
+      x_batch = encoded_x_test[start:end]
+      avg_nll += sess.run(test_nll, {x_ph: x_batch})
 
-  # Print per-data point log-likelihood on test set.
-  avg_nll = 0.0
-  for start in range(0, test_size, batch_size):
-    end = min(test_size, start + batch_size)
-    x_batch = encoded_x_test[start:end]
-    avg_nll += sess.run(test_nll, {x_ph: x_batch})
+    avg_nll /= test_size
+    print("Test average NLL: {:0.8f}".format(avg_nll))
 
-  avg_nll /= test_size
-  print("Test average NLL: {:0.8f}".format(avg_nll))
+    # Generate samples from model.
+    samples = sess.run(x_gen)
+    samples = [''.join([decoder[c] for c in sample]) for sample in samples]
+    print("Samples:")
+    for sample in samples:
+      print(sample)
 
-  # Generate samples from model.
-  samples = sess.run(x_gen)
-  samples = [''.join([decoder[c] for c in sample]) for sample in samples]
-  print("Samples:")
-  for sample in samples:
-    print(sample)
+if __name__ == "__main__":
+  tf.app.run()
